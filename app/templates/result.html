@@ -6,6 +6,7 @@
 {% block actions %}
 <a class="btn secondary small" href="/workbench">再抽检一次</a>
 <a class="btn secondary small" href="/review">去复核页改权重</a>
+<a class="btn secondary small" href="/api/runs/{{ run.run_id }}/sampling.csv">下载抽样清单</a>
 <a class="btn small" href="/api/runs/{{ run.run_id }}/alerts.csv">下载工单 CSV</a>
 {% endblock %}
 {% block status_left %}规则集 v{{ report.dataset.rule_version }} · 业务键 {{ report.dataset.business_key|join(' + ') }} · 耗时 {{ report.elapsed_ms|num(1) }} ms · 同一输入可复现{% endblock %}
@@ -54,12 +55,34 @@
     <div class="k-value">{{ insufficient|length }}</div>
     <div class="k-note">列 × 分组 · 组内样本 &lt; {{ report.outliers.min_sample }} 不判异常</div>
   </div>
+  <div class="kpi {% if sampling and sampling.counts.pending_slots %}err{% else %}ok{% endif %}">
+    <div class="k-label">抽样入选 / 未决</div>
+    <div class="k-value">{% if sampling %}{{ sampling.counts.selected }}{% else %}—{% endif %}<span class="muted small"> / {% if sampling %}{{ sampling.counts.pending_slots }}{% else %}—{% endif %}</span></div>
+    <div class="k-note">
+      {% if sampling %}
+      候选 {{ sampling.counts.candidate_supply }} · 替补 {{ sampling.counts.replacement }} · 跨批补录 {{ sampling.counts.cross_batch_in }}
+      {% else %}本次运行无抽样清单{% endif %}
+    </div>
+  </div>
 </div>
+
+{% if sampling %}
+<div class="alert alert-info" role="status" style="margin:0 0 14px">
+  发布口径：本次分数、异常组与工单只覆盖<strong>抽样入选的 {{ sampling.counts.selected }} 行</strong>
+  （源数据共 {{ report.dataset.rows }} 行）。抽样清单与源数据对账
+  <strong>{{ reconcile.status if reconcile else '—' }}</strong>，发布状态
+  <strong>{{ run.publish_status }}</strong>。批次 <code>{{ sampling.batch_id }}</code> ·
+  种子 <code>{{ sampling.seed }}</code>。
+  <a href="/api/runs/{{ run.run_id }}/sampling.csv">下载抽样清单</a> ·
+  <a href="/api/runs/{{ run.run_id }}/audit">查看审计事件</a>
+</div>
+{% endif %}
 
 <div class="panel">
   <div class="panel-head">
     <div class="segmented">
       <button type="button" data-tab-target="tab-score" class="active">评分卡</button>
+      <button type="button" data-tab-target="tab-sampling">抽样与对账</button>
       <button type="button" data-tab-target="tab-missing">缺失与重复</button>
       <button type="button" data-tab-target="tab-outliers">异常值</button>
       <button type="button" data-tab-target="tab-alerts">告警</button>
@@ -125,6 +148,112 @@
         </p>
       </details>
     </div>
+  </div>
+
+  {# ---------------- 抽样与对账 ---------------- #}
+  <div id="tab-sampling" class="tab-panel" hidden>
+    {% if sampling %}
+    <div class="panel-body tight">
+      <h3 style="margin:0 0 4px">品类配额与抽样状态</h3>
+      <p class="small muted" style="margin:0 0 8px">
+        抽样可重放：入选由 <code>sha256(seed|batch_id|row_id)</code> 升序决定，不依赖行序；
+        同一批次 + 同一计划得到同一份清单。替补池与跨批补录去向逐行写清。
+      </p>
+    </div>
+    <div class="table-wrap roomy">
+      <table class="dense">
+        <thead><tr><th>品类</th><th>配额</th><th>上限</th><th>本批候选</th><th>本批入选</th><th>跨批补录</th><th>替补</th><th>候选未入选</th><th>撤回</th><th>未决</th><th>对账</th></tr></thead>
+        <tbody>
+          {% for cat in sampling.categories %}
+          <tr>
+            <td>{{ cat.category }}</td>
+            <td>{{ cat.quota }}</td>
+            <td>{{ cat.cap }}</td>
+            <td>{{ cat.local_candidates }}</td>
+            <td>{{ cat.selected_local }}</td>
+            <td>{% if cat.cross_batch_in %}<span class="tag warn">{{ cat.cross_batch_in }}</span>{% else %}—{% endif %}</td>
+            <td>{{ cat.replacement }}</td>
+            <td>{{ cat.candidate_backlog }}</td>
+            <td>{% if cat.withdrawn %}{{ cat.withdrawn }}{% else %}—{% endif %}</td>
+            <td>{% if cat.unfilled %}<span class="tag err">{{ cat.unfilled }}</span>{% else %}—{% endif %}</td>
+            <td class="small">{% for q in reconcile.quotas if q.category == cat.category %}<span class="tag {{ 'ok' if q.status == 'pass' else 'err' }}">{{ '已齐套' if q.status == 'pass' else '未齐套' }}</span>{% endfor %}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    <div class="panel-body tight">
+      <h3 style="margin:0 0 4px">对账清单</h3>
+    </div>
+    <div class="table-wrap roomy">
+      <table class="dense">
+        <thead><tr><th>对账项</th><th>状态</th><th>说明</th></tr></thead>
+        <tbody>
+          {% for check in reconcile.checks %}
+          <tr>
+            <td>{{ check.check }}</td>
+            <td>{% if check.status == 'pass' %}<span class="tag ok">通过</span>{% else %}<span class="tag err">未通过</span>{% endif %}</td>
+            <td class="small muted">{{ check.detail }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    <div class="panel-body tight">
+      <h3 style="margin:0 0 4px">抽样清单明细（仅列出入选 / 替补 / 未决 / 撤回）</h3>
+      <p class="small muted" style="margin:0 0 8px">完整候选清单请下载 CSV。可在下方撤回入选行或调整配额，变更后会自动重新对账，齐套后需重新发布。</p>
+    </div>
+    <div class="table-wrap roomy">
+      <table class="dense">
+        <thead><tr><th>row_id</th><th>品类</th><th>状态</th><th>顺位</th><th>来源批次</th><th>去向说明</th><th>操作</th></tr></thead>
+        <tbody>
+          {% for e in sampling.entries if e.status in ('selected', 'replacement', 'pending', 'withdrawn') %}
+          <tr>
+            <td><code>{{ e.row_id }}</code></td>
+            <td>{{ e.category }}</td>
+            <td>
+              {% if e.status == 'selected' %}<span class="tag ok">入选</span>
+              {% elif e.status == 'replacement' %}<span class="tag warn">替补</span>
+              {% elif e.status == 'pending' %}<span class="tag err">未决</span>
+              {% else %}<span class="tag">撤回</span>{% endif %}
+            </td>
+            <td class="small">{% if e.status == 'replacement' %}替补 {{ e.slot }}{% elif e.rank_index %}#{{ e.rank_index }}{% else %}—{% endif %}</td>
+            <td class="small">{{ e.source_batch or '本批' }}</td>
+            <td class="small muted cell-ellipsis">{{ e.disposition }}</td>
+            <td class="small">
+              {% if e.status in ('selected', 'replacement') %}
+              <button type="button" class="btn small secondary sample-withdraw"
+                      data-run="{{ run.run_id }}" data-row="{{ e.row_id }}">撤回</button>
+              {% else %}—{% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    <div class="panel-body tight">
+      <h3 style="margin:0 0 4px">调整品类配额（重规划）</h3>
+      <p class="small muted" style="margin:0 0 8px">
+        改小 → 超配行转入替补池；改大 → 从候选/跨批补入；每一行去向写入清单。变更后自动重新对账。
+      </p>
+      <div class="field" style="display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr) 130px;gap:8px;align-items:end">
+        <div>
+          <label for="replan-quota">新配额（JSON：品类 → 数量）</label>
+          <input type="text" id="replan-quota" placeholder='{"数码配件": 10}'>
+        </div>
+        <div>
+          <label for="replan-actor">操作人</label>
+          <input type="text" id="replan-actor" placeholder="复核人">
+        </div>
+        <button type="button" class="btn small" data-run="{{ run.run_id }}" id="replan-btn">提交重规划</button>
+      </div>
+      <div id="sampling-msg" class="alert alert-info" hidden style="margin:10px 0 0"></div>
+    </div>
+    {% else %}
+    <div class="empty">本次运行没有抽样清单。</div>
+    {% endif %}
   </div>
 
   {# ---------------- 缺失与重复 ---------------- #}
@@ -293,4 +422,59 @@
     </div>
   </div>
 </div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function () {
+  function post(url, payload) {
+    return fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload || {}) }).then(function (res) {
+      return res.json().then(function (data) {
+        if (!res.ok) throw new Error((data && data.detail) || ('请求失败：' + res.status));
+        return data;
+      });
+    });
+  }
+  var box = document.getElementById('sampling-msg');
+  function msg(text, cls) { if (!box) return; box.hidden = false; box.className = 'alert ' + (cls || 'alert-info'); box.textContent = text; }
+
+  Array.prototype.forEach.call(document.querySelectorAll('.sample-withdraw'), function (btn) {
+    btn.addEventListener('click', function () {
+      var actor = window.prompt('撤回操作人（必填，写入审计）', '复核人');
+      if (!actor) return;
+      var reason = window.prompt('撤回原因（必填，写入审计）', '上游撤回/录入错误');
+      if (!reason) return;
+      btn.disabled = true;
+      post('/api/runs/' + btn.getAttribute('data-run') + '/sampling/withdraw',
+           { row_id: btn.getAttribute('data-row'), actor: actor, reason: reason })
+        .then(function (data) {
+          msg('已撤回 ' + data.row_id + '，审计事件已记录；对账状态 ' +
+              (data.publish_status || '') + '。正在刷新…');
+          setTimeout(function () { location.reload(); }, 1200);
+        })
+        .catch(function (err) { btn.disabled = false; msg('撤回失败：' + err.message, 'alert-error'); });
+    });
+  });
+
+  var replan = document.getElementById('replan-btn');
+  if (replan) replan.addEventListener('click', function () {
+    var raw = (document.getElementById('replan-quota') || {}).value || '';
+    if (!raw.trim()) { msg('请填写新配额 JSON，例如 {"数码配件": 10}', 'alert-error'); return; }
+    var quotas;
+    try { quotas = JSON.parse(raw); }
+    catch (e) { msg('配额必须是合法 JSON：' + e.message, 'alert-error'); return; }
+    var actor = (document.getElementById('replan-actor') || {}).value || '复核人';
+    replan.disabled = true;
+    post('/api/runs/' + replan.getAttribute('data-run') + '/sampling/replan',
+         { category_quota: quotas, actor: actor })
+      .then(function (data) {
+        msg('重规划完成，未决 ' + data.counts.pending_slots + ' 行；对账状态 ' +
+            (data.publish_status || '') + '。正在刷新…');
+        setTimeout(function () { location.reload(); }, 1200);
+      })
+      .catch(function (err) { replan.disabled = false; msg('重规划失败：' + err.message, 'alert-error'); });
+  });
+})();
+</script>
 {% endblock %}

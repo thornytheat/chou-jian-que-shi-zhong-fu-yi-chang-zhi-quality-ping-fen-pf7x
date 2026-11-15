@@ -40,7 +40,7 @@ def poll(client, run_id: str, timeout: float = 30.0) -> dict:
     deadline = time.time() + timeout
     while time.time() < deadline:
         data = client.get(f"/api/runs/{run_id}/status").json()
-        if data["status"] in ("done", "failed"):
+        if data["status"] in ("done", "failed", "blocked"):
             return data
         time.sleep(0.05)
     raise AssertionError(f"运行 {run_id} 超时未完成")

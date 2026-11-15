@@ -41,6 +41,11 @@ def test_run_sample_and_result_page(client):
     assert status["rows"] == 2000
     assert status["grade"] in {"A", "B", "C", "D"}
     assert 0 < status["total_score"] <= 100
+    # 抽样闸门：只有对账齐套的入选行参与评分与发布
+    assert status["reconcile_status"] == "complete"
+    assert status["publish_status"] == "published"
+    assert 0 < status["sampled_rows"] < status["rows"]
+    assert status["sampling_counts"]["selected"] == status["sampled_rows"]
 
     page = client.get(f"/result/{run_id}")
     assert page.status_code == 200
@@ -49,7 +54,8 @@ def test_run_sample_and_result_page(client):
     assert "每列每规则违规率" in html
     assert "样本不足" in html
     assert "合并" in html                        # 同格多规则合并的标记
-    assert "R000031" in html                     # 越界+双法命中的单元格有据可查
+    assert "抽样与对账" in html                  # 抽样状态与对账在结果页可查
+    assert "对账" in html
 
 
 def test_missing_column_csv_returns_400(client):

@@ -28,6 +28,23 @@
     "B": 80,
     "C": 70
   },
+  "sampling": {
+    "seed": "qualiscan-2026",
+    "default_quota": 10,
+    "category_quota": {
+      "数码配件": 20,
+      "家居日用": 15,
+      "食品饮料": 8,
+      "服饰鞋包": 5,
+      "小众配件": 3
+    },
+    "replacement_pool": 2,
+    "cross_batch": {
+      "enabled": true,
+      "max_per_category": 100
+    },
+    "over_quota_allowance": 0.0
+  },
   "rule_weights": {
     "missing": 1.0,
     "type": 0.6,

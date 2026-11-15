@@ -1,0 +1,139 @@
+{% extends "base.html" %}
+{% block title %}未发布 · {{ app_name }}{% endblock %}
+{% block crumb %}抽检结果（未发布）{% endblock %}
+{% block meta %}<span class="dot err"></span>{{ run.batch_id or run.run_id }} · 发布闸门已拦截{% endblock %}
+{% block actions %}
+<a class="btn secondary small" href="/workbench">回工作台</a>
+<a class="btn secondary small" href="/api/runs/{{ run.run_id }}/sampling.csv">导出抽样清单</a>
+{% endblock %}
+{% block status_left %}分数、异常组与工单只有在抽样清单与源数据对账齐套后才发布{% endblock %}
+{% block status_right %}run_id <code>{{ run.run_id }}</code>{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1 class="page-title">抽检结果 · 未发布</h1>
+    <p class="page-sub">
+      运行 <code>{{ run.run_id }}</code> · 批次 <code>{{ run.batch_id or '—' }}</code> ·
+      状态 <strong>{% if run.publish_status == 'republish_required' %}清单已变更，待重新计算并发布{% elif run.status == 'blocked' %}已阻断{% elif run.status == 'failed' %}失败{% else %}计算中{% endif %}</strong>
+      {% if run.error %}<br>原因：{{ run.error }}{% endif %}
+    </p>
+  </div>
+</div>
+
+<div class="alert alert-error" role="alert">
+  抽样清单与源数据尚未对账齐套，或运行中途失败：<strong>分数、异常组与工单暂不发布</strong>。
+  请按下面的对账项修正后重新发布；已确认的阶段结果会在断点续跑时复用，未完成阶段不会进入结果。
+</div>
+
+{% if run.reconcile %}
+<section class="panel">
+  <div class="panel-head">
+    <h2>对账结果</h2>
+    <div class="panel-actions">
+      <span class="tag {{ 'ok' if run.reconcile.status == 'complete' else 'err' }}">{{ run.reconcile.status }}</span>
+      <span class="tag">发布状态 {{ run.publish_status }}</span>
+    </div>
+  </div>
+  <div class="table-wrap roomy">
+    <table class="dense">
+      <thead><tr><th>对账项</th><th>状态</th><th>说明</th></tr></thead>
+      <tbody>
+        {% for check in run.reconcile.checks %}
+        <tr>
+          <td>{{ check.check }}</td>
+          <td>{% if check.status == 'pass' %}<span class="tag ok">通过</span>{% else %}<span class="tag err">未通过</span>{% endif %}</td>
+          <td class="small muted">{{ check.detail }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endif %}
+
+{% if run.sampling %}
+<section class="panel">
+  <div class="panel-head">
+    <h2>抽样清单概要</h2>
+    <div class="panel-actions">
+      <span class="tag">候选 {{ run.sampling.counts.candidate_supply }}</span>
+      <span class="tag ok">入选 {{ run.sampling.counts.selected }}</span>
+      <span class="tag warn">未决 {{ run.sampling.counts.pending_slots }}</span>
+    </div>
+  </div>
+  <div class="table-wrap roomy">
+    <table class="dense">
+      <thead><tr><th>品类</th><th>配额</th><th>本批入选</th><th>跨批补录</th><th>替补</th><th>候选</th><th>未决</th><th>撤回</th></tr></thead>
+      <tbody>
+        {% for cat in run.sampling.categories %}
+        <tr>
+          <td>{{ cat.category }}</td>
+          <td>{{ cat.quota }}</td>
+          <td>{{ cat.selected_local }}</td>
+          <td>{{ cat.cross_batch_in }}</td>
+          <td>{{ cat.replacement }}</td>
+          <td>{{ cat.candidate_backlog }}</td>
+          <td>{% if cat.unfilled %}<span class="tag warn">{{ cat.unfilled }}</span>{% else %}—{% endif %}</td>
+          <td>{{ cat.withdrawn }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <div class="panel-actions">
+    <span class="small muted" style="align-self:center">
+      对账齐套后可重新发布；撤回/重规划等变更会先重新对账，再决定是否发布。
+    </span>
+    <a class="btn secondary small" href="/api/runs/{{ run.run_id }}/sampling.csv">导出抽样清单 CSV</a>
+    {% if run.checkpoint and not run.checkpoint.complete and run.status != 'running' %}
+    <button type="button" class="btn small" id="resume-run" data-run="{{ run.run_id }}">从断点续跑</button>
+    {% endif %}
+    <button type="button" class="btn small secondary" id="publish-run" data-run="{{ run.run_id }}">重新对账并发布</button>
+  </div>
+  <div id="publish-msg" class="alert alert-info" hidden style="margin:12px 14px"></div>
+</section>
+{% endif %}
+
+<section class="panel">
+  <div class="panel-head"><h2>审计与断点</h2><div class="panel-actions"><span class="tag">{{ run.stage }}</span></div></div>
+  <div class="panel-body">
+    <p class="small muted" style="margin:0">
+      阶段进度：{{ run.stage_index }}/{{ stages_total }}。已确认的阶段结果保存在断点里；
+      续跑只补算未完成阶段，未完成阶段不会进入结果。
+    </p>
+  </div>
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function () {
+  function post(url, payload) {
+    return fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload || {}) }).then(function (res) {
+      return res.json().then(function (data) {
+        if (!res.ok) throw new Error((data && data.detail) || ('请求失败：' + res.status));
+        return data;
+      });
+    });
+  }
+  var box = document.getElementById('publish-msg');
+  function msg(text, cls) { if (!box) return; box.hidden = false; box.className = 'alert ' + (cls || 'alert-info'); box.textContent = text; }
+  var resume = document.getElementById('resume-run');
+  if (resume) resume.addEventListener('click', function () {
+    resume.disabled = true;
+    post('/api/runs/' + resume.getAttribute('data-run') + '/resume', {})
+      .then(function () { msg('已从断点续跑，稍后刷新查看结果。'); setTimeout(function(){ location.reload(); }, 1500); })
+      .catch(function (err) { resume.disabled = false; msg('续跑失败：' + err.message, 'alert-error'); });
+  });
+  var publish = document.getElementById('publish-run');
+  if (publish) publish.addEventListener('click', function () {
+    publish.disabled = true;
+    post('/api/runs/' + publish.getAttribute('data-run') + '/publish', {})
+      .then(function () { msg('已重新对账并开始重算，完成后自动发布。'); setTimeout(function(){ location.href = '/result/' + publish.getAttribute('data-run'); }, 1500); })
+      .catch(function (err) { publish.disabled = false; msg('发布失败：' + err.message, 'alert-error'); });
+  });
+})();
+</script>
+{% endblock %}

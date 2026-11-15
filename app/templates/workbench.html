@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block title %}抽检工作台 · {{ app_name }}{% endblock %}
 {% block crumb %}抽检工作台{% endblock %}
-{% block meta %}<span class="dot ok"></span>规则集 v{{ rules_version }} · {{ column_specs|length }} 列 · {{ stages|length }} 阶段{% endblock %}
+{% block meta %}<span class="dot ok"></span>规则集 v{{ rules_version }} · {{ column_specs|length }} 列 · {{ stages|length }} 阶段 · 品类配额抽样{% endblock %}
 {% block actions %}
 <a class="btn secondary small" href="/review">改权重</a>
 <button type="submit" form="upload-form" class="btn small">上传并执行</button>
@@ -15,7 +15,7 @@
     <h1 class="page-title">抽检工作台</h1>
     <p class="page-sub">
       两种输入任选其一：内置样例（{{ sample_rows }} 行 × {{ column_specs|length }} 列）或上传自己的 CSV（列名必须与规则集一致）。
-      执行后按 {{ stages|length }} 个阶段推进，完成后自动跳结果页；错误输入会返回明确原因，不会静默跳过。
+      执行后按 {{ stages|length }} 个阶段推进：先按品类配额生成可重放抽样清单，与源数据对账齐套后才发布分数、异常组和工单。
     </p>
   </div>
 </div>
@@ -50,6 +50,17 @@
         规则集要求的列：
         {% for col in column_specs %}<code>{{ col.name }}</code>{% if not loop.last %} · {% endif %}{% endfor %}
       </p>
+
+      <details class="help" open>
+        <summary>品类抽样配额（默认来自规则集，可按批次覆盖）</summary>
+        <div class="field" style="margin-top:8px">
+          <label>配额覆盖（JSON，留空用规则集默认值）</label>
+          <textarea id="quota-overrides" placeholder='{"数码配件": 15, "小众配件": 3}'></textarea>
+        </div>
+        <p class="small muted" style="margin:0">
+          抽样决定可重放：入选按 <code>sha256(seed|批次|row_id)</code> 升序取前 N。配额改小会把超配行转入替补池，改大会从候选补入，去向逐行记录。
+        </p>
+      </details>
 
       <details class="help">
         <summary>或者直接粘贴 CSV 文本</summary>
@@ -160,7 +171,81 @@
       </div>
       <div class="panel-actions">
         <span class="small muted" style="align-self:center">
-          载入 → 缺失 → 重复 → 异常 → 类型与范围校验 → 加权评分 → 告警合并；每步都是纯函数，同一输入同一分数。
+          载入 → 抽样 → 对账 → 缺失 → 重复 → 异常 → 类型与范围校验 → 加权评分 → 告警合并 → 发布；每步都是纯函数，同一输入同一分数。
+        </span>
+      </div>
+    </section>
+
+    <section class="panel" id="m0">
+      <div class="panel-head">
+        <h2>月度抽检品类配额（可重放抽样）</h2>
+        <div class="panel-actions">
+          <span class="tag">种子 <code>{{ sampling_plan.seed }}</code></span>
+          <span class="tag">替补池 {{ sampling_plan.replacement_pool }} 行/品类</span>
+        </div>
+      </div>
+      <div class="table-wrap auto">
+        <table class="dense">
+          <thead><tr><th>品类</th><th>抽样配额</th><th>替补池深度</th><th>说明</th></tr></thead>
+          <tbody>
+            {% for name, quota in sampling_plan.category_quota.items() %}
+            <tr>
+              <td>{{ name }}</td>
+              <td>{{ quota }}</td>
+              <td>{{ sampling_plan.replacement_pool }}</td>
+              <td class="small muted">入选按 <code>sha256(seed|批次|row_id)</code> 升序取前 {{ quota }}；其后 {{ sampling_plan.replacement_pool }} 行入替补池</td>
+            </tr>
+            {% endfor %}
+            <tr>
+              <td class="muted">未列出的品类</td>
+              <td>{{ sampling_plan.default_quota }}</td>
+              <td>{{ sampling_plan.replacement_pool }}</td>
+              <td class="small muted">取默认配额；候选不足时按配置跨批补录（最多 {{ sampling_plan.cross_batch.max_per_category }} 行/品类）</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="panel-actions">
+        <span class="small muted" style="align-self:center">
+          每行状态（候选 / 入选 / 替补 / 未决 / 撤回 / 已发布）在结果页「抽样与对账」可查，并能导出 CSV 留档。
+        </span>
+        <a class="btn secondary small" href="/result/{{ latest.run_id if latest }}#tab-sampling">查看最近一次抽样状态</a>
+      </div>
+    </section>
+
+    <section class="panel" id="m7">
+      <div class="panel-head">
+        <h2>抽样 / 对账 / 发布状态板</h2>
+        <div class="panel-actions">
+          <span class="tag">最近一次：{{ latest.run_id if latest else '—' }}</span>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table class="dense">
+          <thead><tr><th>运行</th><th>批次</th><th>候选</th><th>入选</th><th>替补</th><th>未决</th><th>撤回</th><th>对账</th><th>发布</th><th>时间</th></tr></thead>
+          <tbody>
+            {% for item in history %}
+            <tr>
+              <td><a href="/result/{{ item.run_id }}">{{ item.run_id }}</a></td>
+              <td class="small">{{ item.batch_id or '—' }}</td>
+              <td class="small">{{ item.candidate_rows or '—' }}</td>
+              <td class="small">{% if item.sampled_rows %}<span class="tag ok">{{ item.sampled_rows }}</span>{% else %}—{% endif %}</td>
+              <td class="small">{{ item.replacement_rows or '—' }}</td>
+              <td class="small">{% if item.pending_slots %}<span class="tag err">{{ item.pending_slots }}</span>{% else %}—{% endif %}</td>
+              <td class="small">{% if item.withdrawn_rows %}{{ item.withdrawn_rows }}{% else %}—{% endif %}</td>
+              <td>{% if item.reconcile_status == 'complete' %}<span class="tag ok">齐套</span>{% elif item.reconcile_status in ('mismatch',) %}<span class="tag err">未齐套</span>{% else %}<span class="tag">{{ item.reconcile_status }}</span>{% endif %}</td>
+              <td>{% if item.publish_status == 'published' %}<span class="tag ok">已发布</span>{% elif item.publish_status == 'withheld' %}<span class="tag err">暂扣</span>{% else %}<span class="tag">{{ item.publish_status }}</span>{% endif %}</td>
+              <td class="small muted nowrap">{{ item.created_at }}</td>
+            </tr>
+            {% else %}
+            <tr><td colspan="10" class="muted">暂无运行记录。执行一次抽检后，这里会显示候选/入选/替补/未决与发布状态。</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      <div class="panel-actions">
+        <span class="small muted" style="align-self:center">
+          只展示汇总状态。逐行候选/入选/替补/未决去向与审计事件在结果页与 <code>/api/runs/&lt;id&gt;/sampling</code> 查看。
         </span>
       </div>
     </section>
@@ -257,7 +342,12 @@
               <td>{% if item.total_score is not none %}{{ item.total_score|num(2) }}{% else %}—{% endif %}</td>
               <td>{% if item.grade %}<span class="tag {% if item.grade == 'A' %}ok{% elif item.grade == 'B' %}warn{% else %}err{% endif %}">{{ item.grade }}</span>{% else %}—{% endif %}</td>
               <td class="small">{{ item.stage }}</td>
-              <td class="small">{% if item.status == 'done' %}<a href="/api/runs/{{ item.run_id }}/alerts.csv">下载</a>{% else %}—{% endif %}</td>
+              <td class="small">
+                {% if item.publish_status == 'published' and item.status == 'done' %}
+                <a href="/api/runs/{{ item.run_id }}/alerts.csv">下载</a>
+                {% elif item.status == 'blocked' %}<span class="tag err">暂扣</span>
+                {% else %}—{% endif %}
+              </td>
             </tr>
             {% else %}
             <tr><td colspan="8" class="muted">暂无记录。执行一次抽检后，这里会按时间倒序列出运行与工单下载入口。</td></tr>

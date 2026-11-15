@@ -71,28 +71,49 @@
   }
 
   async function poll(runId) {
-    var total = 7;
+    var total = 10;
     for (var i = 0; i < 600; i++) {
       var st = await fetch('/api/runs/' + runId + '/status').then(readJSON);
       total = st.stage_total || total;
       var done = st.status === 'done';
       var failed = st.status === 'failed';
+      var blocked = st.status === 'blocked';
       if (progressCard) progressCard.hidden = false;
-      if (bar) bar.style.width = (failed ? 100 : Math.min(100, Math.round(((st.stage_index + (done ? 1 : 0)) / total) * 100))) + '%';
+      if (bar) bar.style.width = (failed || blocked ? 100 : Math.min(100, Math.round(((st.stage_index + (done ? 1 : 0)) / total) * 100))) + '%';
       if (text) {
-        text.textContent = failed
-          ? ('执行失败：' + (st.error || '未知错误'))
-          : (done ? ('完成：' + st.rows + ' 行，总分 ' + Number(st.total_score).toFixed(2) + '（' + st.grade + '），正在跳转结果页…')
-                  : ('当前阶段：' + st.stage + '（' + (st.stage_index + 1) + '/' + total + '）'));
+        if (blocked) {
+          text.textContent = '对账未齐套，结果暂不发布：' + (st.error || st.reconcile_blockers[0] || '请查看对账项');
+        } else if (failed) {
+          text.textContent = '执行失败：' + (st.error || '未知错误');
+        } else if (done) {
+          text.textContent = '完成：源数据 ' + st.rows + ' 行、抽样入选 ' + st.sampled_rows +
+            ' 行，总分 ' + Number(st.total_score).toFixed(2) + '（' + st.grade + '），正在跳转结果页…';
+        } else {
+          text.textContent = '当前阶段：' + st.stage + '（' + (st.stage_index + 1) + '/' + total + '）';
+        }
       }
       renderStages(done ? total : st.stage_index);
-      if (stateTag) stateTag.textContent = failed ? '失败' : (done ? '已完成' : '执行中 ' + (st.stage_index + 1) + '/' + total);
+      if (stateTag) stateTag.textContent = blocked ? '暂扣' : (failed ? '失败' : (done ? '已发布' : '执行中 ' + (st.stage_index + 1) + '/' + total));
       if (failed) { setBusy(false); showError(new Error(st.error || '计算失败')); return; }
+      if (blocked) { window.location.href = st.result_url; return; }
       if (done) { window.location.href = st.result_url; return; }
       await new Promise(function (r) { setTimeout(r, 300); });
     }
     setBusy(false);
     showError(new Error('等待超时，请到「复核与工单」页查看运行记录'));
+  }
+
+  function quotaOverrides() {
+    var area = qs('#quota-overrides');
+    var raw = area ? area.value.trim() : '';
+    if (!raw) return {};
+    try {
+      var parsed = JSON.parse(raw);
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('需要对象');
+      return parsed;
+    } catch (e) {
+      throw new Error('品类配额必须是 { "品类": 数字 } 形式的 JSON：' + e.message);
+    }
   }
 
   function start(promise) {
@@ -101,7 +122,7 @@
     if (progressCard) {
       progressCard.hidden = false;
       if (bar) bar.style.width = '4%';
-      if (text) text.textContent = '已提交，正在载入数据…';
+      if (text) text.textContent = '已提交，正在载入数据并生成抽样清单…';
       renderStages(0);
       progressCard.scrollIntoView({ block: 'center' });
     }
@@ -112,7 +133,10 @@
   var sampleBtn = qs('#run-sample');
   if (sampleBtn) {
     sampleBtn.addEventListener('click', function () {
-      start(window.postJSON(sampleBtn.getAttribute('data-endpoint'), { source: 'sample' }));
+      var quotas;
+      try { quotas = quotaOverrides(); } catch (e) { showError(e); return; }
+      start(window.postJSON(sampleBtn.getAttribute('data-endpoint'),
+        { source: 'sample', category_quota: quotas }));
     });
   }
 
@@ -127,6 +151,9 @@
       }
       var form = new FormData();
       form.append('file', input.files[0]);
+      var quotas;
+      try { quotas = quotaOverrides(); } catch (e) { showError(e); return; }
+      if (Object.keys(quotas).length) form.append('category_quota', JSON.stringify(quotas));
       clearError();
       setBusy(true);
       if (progressCard) {
@@ -144,7 +171,10 @@
       var area = qs('#csv-text');
       var content = area ? area.value : '';
       if (!content.trim()) { showError(new Error('请先粘贴含表头的 CSV 文本')); return; }
-      start(window.postJSON(textBtn.getAttribute('data-endpoint'), { csv_text: content }));
+      var quotas;
+      try { quotas = quotaOverrides(); } catch (e) { showError(e); return; }
+      start(window.postJSON(textBtn.getAttribute('data-endpoint'),
+        { csv_text: content, category_quota: quotas }));
     });
   }
 
